@@ -18,8 +18,8 @@
 #include <iostream>
 #include <cstdint>
 
-WolSender::WolSender(const std::string &macAddress)
-    : m_macAddress(macAddress)
+WolSender::WolSender(const std::string &macAddress, const std::string &targetIp)
+    : m_macAddress(macAddress), m_targetIp(targetIp)
 {
 }
 
@@ -49,6 +49,19 @@ int WolSender::run()
     closeSocket();
 
     std::cout << "Magic packet sent." << std::endl;
+
+    // 如果提供了目标IP地址，等待主机上线
+    if (!m_targetIp.empty()) {
+        std::cout << "Waiting for host " << m_targetIp << " to come online (timeout: 60 seconds)..." << std::endl;
+
+        if (waitForHostOnline(m_targetIp)) {
+            std::cout << "Host " << m_targetIp << " is now online!" << std::endl;
+            return 0;
+        } else {
+            std::cerr << "Timeout waiting for host " << m_targetIp << " to come online." << std::endl;
+            return -1;
+        }
+    }
 
     return 0;
 }
@@ -166,11 +179,21 @@ void WolSender::sendMagicPacket(const uint8_t* macBytes, size_t size) const
         }
     }
 
-    // 设置广播地址
+    // 设置目标地址
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(9);                            // 标准WOL端口通常是7或9
-    addr.sin_addr.s_addr = inet_addr("255.255.255.255"); // 广播地址
+    addr.sin_port = htons(9); // 标准WOL端口通常是7或9
+
+    // 如果提供了目标IP地址，直接发送到该地址，否则使用广播地址
+    if (!m_targetIp.empty()) {
+        // 直接发送到目标IP地址
+        addr.sin_addr.s_addr = inet_addr(m_targetIp.c_str());
+        std::cout << "Sending magic packet directly to IP: " << m_targetIp << std::endl;
+    } else {
+        // 使用广播地址
+        addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+        std::cout << "Sending magic packet to broadcast address" << std::endl;
+    }
 
     // 发送魔术包
     int sentBytes =
@@ -198,3 +221,103 @@ void WolSender::closeSocket() const
 #endif
     }
 }
+
+// 等待主机上线，超时时间默认60秒
+bool WolSender::waitForHostOnline(const std::string& targetIp, int timeoutSeconds) const
+{
+    std::cout << "Checking if host " << targetIp << " is online..." << std::endl;
+
+    const int checkIntervalMs = 2000; // 每2秒检查一次
+    const int maxAttempts = (timeoutSeconds * 1000) / checkIntervalMs;
+
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        // 先尝试ping
+        if (pingHost(targetIp)) {
+            return true;
+        }
+
+        // 再尝试TCP连接到常用端口
+        if (tryTcpConnect(targetIp, 22) || // SSH
+            tryTcpConnect(targetIp, 80) || // HTTP
+            tryTcpConnect(targetIp, 443)) { // HTTPS
+            return true;
+        }
+
+        // 暂停一段时间后再次尝试
+#ifdef _WIN32
+        Sleep(checkIntervalMs); // Windows
+#else
+        usleep(checkIntervalMs * 1000); // Unix (微秒)
+#endif
+
+        std::cout << "Waiting... " << ((attempt + 1) * checkIntervalMs / 1000) << "/" << timeoutSeconds << " seconds" << std::endl;
+    }
+
+    return false; // 超时，主机未上线
+}
+
+// 使用ping检查主机是否在线
+bool WolSender::pingHost(const std::string& targetIp) const
+{
+#ifdef _WIN32
+    // Windows下使用system命令执行ping
+    std::string pingCmd = "ping -n 1 -w 1000 " + targetIp + " > nul 2>&1";
+    int result = system(pingCmd.c_str());
+    return (result == 0);
+#else
+    // Unix系统下使用ping命令
+    std::string pingCmd = "ping -c 1 -W 1 " + targetIp + " > /dev/null 2>&1";
+    int result = system(pingCmd.c_str());
+    return (result == 0);
+#endif
+}
+
+// 尝试TCP连接到指定端口
+bool WolSender::tryTcpConnect(const std::string& targetIp, int port) const
+{
+    SOCKET_FD sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == INVALID_SOCKET) {
+        return false;
+    }
+
+    // 设置连接超时
+#ifdef _WIN32
+    DWORD timeout = 1000; // 1秒
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+    struct timeval timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+#endif
+
+    struct sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+
+    // 将IP字符串转换为网络地址
+    if (inet_pton(AF_INET, targetIp.c_str(), &(serverAddr.sin_addr)) <= 0) {
+        // IP地址格式无效
+#ifdef _WIN32
+        closesocket(sockfd);
+#else
+        close(sockfd);
+#endif
+        return false;
+    }
+
+    // 尝试连接
+    int connectResult = connect(sockfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    // 关闭套接字
+#ifdef _WIN32
+    closesocket(sockfd);
+#else
+    close(sockfd);
+#endif
+
+    return (connectResult != SOCKET_ERROR);
+}
+

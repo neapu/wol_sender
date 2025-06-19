@@ -16,7 +16,7 @@
 
 class WolSender {
 public:
-    explicit WolSender(const std::string& macAddress);
+    explicit WolSender(const std::string& macAddress, const std::string& targetIp = "");
 
     int run();
 
@@ -28,7 +28,14 @@ private:
     bool openSocket();
     void sendMagicPacket(const uint8_t* macBytes, size_t size) const;
     void closeSocket() const;
+
+    // 等待主机上线
+    bool waitForHostOnline(const std::string& targetIp, int timeoutSeconds = 60) const;
+    bool pingHost(const std::string& targetIp) const;
+    bool tryTcpConnect(const std::string& targetIp, int port) const;
+
 private:
     std::string m_macAddress;
+    std::string m_targetIp;  // 目标主机IP地址
     SOCKET_FD m_socket = INVALID_SOCKET;
 };
